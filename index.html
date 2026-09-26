@@ -252,6 +252,15 @@
     color:var(--ink-faint);
     font-family:var(--mono);
   }
+  dialog{
+    border:1px solid var(--line-strong);
+    border-radius:var(--radius);
+    background:var(--paper-raised);
+    padding:0;
+  }
+  dialog::backdrop{
+    background:rgba(0,0,0,.35);
+  }
   @media (max-width:720px){
     .grid{ grid-template-columns:1fr; }
     .row-dates{ grid-template-columns:1fr 1fr; }
@@ -317,8 +326,34 @@
     </div>
   </section>
 
+  <dialog id="dialog-carga">
+    <div style="min-width:min(560px, 85vw); max-width:640px; padding:1.25rem;">
+      <h2 style="font-family:var(--serif); font-size:1.05rem; margin:0 0 .5rem;">Cargar selección de la IA</h2>
+      <p style="font-size:.82rem; color:var(--ink-soft); margin:0 0 .75rem;">
+        Pegá acá lo que te devolvió la IA (un array de números, ej:
+        <code>[2,5,11]</code>). Va a marcar los checkboxes correspondientes
+        en la tabla de resultados de abajo.
+      </p>
+      <textarea id="respuesta-ia" rows="3" style="width:100%; font-family:var(--mono); font-size:.82rem; padding:.6rem; border:1px solid var(--line-strong); border-radius:var(--radius);" placeholder="ej: [2,5,11]"></textarea>
+      <div style="display:flex; justify-content:flex-end; gap:.6rem; margin-top:1rem;">
+        <button type="button" class="secondary" id="btn-cancelar-carga">Cancelar</button>
+        <button type="button" class="primary" id="btn-aplicar-carga">Aplicar selección</button>
+      </div>
+    </div>
+  </dialog>
+
   <section class="panel" id="panel-resultados" style="display:none;">
     <h2>2. Elegir y descargar</h2>
+    <p style="font-size:.82rem; color:var(--ink-soft); margin:0 0 1rem;">
+      Podés tildar filas a mano, o usar el flujo de dos pasos con tu IA de
+      confianza: descargá el archivo <strong>.md</strong> con la lista y las
+      instrucciones, pedile a la IA que elija según lo que buscás, y pegá su
+      respuesta en <strong>"Cargar selección de la IA"</strong>.
+    </p>
+    <div class="actions-bar" style="margin-top:0; margin-bottom:1rem;">
+      <button class="secondary" id="btn-descargar-md">Descargar descripciones (.md)</button>
+      <button class="secondary" id="btn-abrir-carga">Cargar selección de la IA</button>
+    </div>
     <div id="tabla-contenedor"></div>
     <div class="sticky-bar">
       <span class="count" id="count-seleccion">0 seleccionadas</span>
@@ -400,6 +435,34 @@ function slugArchivo(nombre) {
 }
 
 let presentacionesActuales = [];
+let filtrosActuales = { cuit: '', desde: '', hasta: '', tipo: '' };
+
+// ---- Trae el listado completo (sin filtrar), reutilizado por ambos modos de búsqueda ----
+async function obtenerTodasLasPresentaciones(cuit) {
+  const url = `https://www.cnv.gov.ar/SitioWeb/Empresas/Empresa/${cuit}`;
+  const resp = await fetchConProxy(url);
+  const html = await resp.text();
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  const vistos = new Set();
+  const presentaciones = [];
+  doc.querySelectorAll('tr').forEach(fila => {
+    const celdas = fila.querySelectorAll('td');
+    if (celdas.length < 5) return;
+    const link = fila.querySelector('a[href*="presentations/publicview/"], a[href*="Presentations/publicview/"]');
+    if (!link) return;
+    const m = link.getAttribute('href').match(/publicview\/([0-9a-fA-F-]{36})/);
+    if (!m) return;
+    const guid = m[1].toLowerCase();
+    if (vistos.has(guid)) return;
+    vistos.add(guid);
+
+    const fechaTexto = celdas[0].textContent.trim();
+    const descripcion = celdas[2] ? celdas[2].textContent.trim() : '';
+    presentaciones.push({ fechaTexto, fecha: parsearFechaEs(fechaTexto), descripcion, guid });
+  });
+  return presentaciones;
+}
 
 async function buscar() {
   const cuit = limpiarCuit(document.getElementById('cuit').value);
@@ -421,39 +484,14 @@ async function buscar() {
   document.getElementById('panel-resultados').style.display = 'none';
 
   try {
-    const url = `https://www.cnv.gov.ar/SitioWeb/Empresas/Empresa/${cuit}`;
-    const resp = await fetchConProxy(url);
-    const html = await resp.text();
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-
-    const vistos = new Set();
-    let presentaciones = [];
-    doc.querySelectorAll('tr').forEach(fila => {
-      const celdas = fila.querySelectorAll('td');
-      if (celdas.length < 5) return;
-      const link = fila.querySelector('a[href*="presentations/publicview/"], a[href*="Presentations/publicview/"]');
-      if (!link) return;
-      const m = link.getAttribute('href').match(/publicview\/([0-9a-fA-F-]{36})/);
-      if (!m) return;
-      const guid = m[1].toLowerCase();
-      if (vistos.has(guid)) return;
-      vistos.add(guid);
-
-      const fechaTexto = celdas[0].textContent.trim();
-      const descripcion = celdas[2] ? celdas[2].textContent.trim() : '';
-      presentaciones.push({
-        fechaTexto,
-        fecha: parsearFechaEs(fechaTexto),
-        descripcion,
-        guid,
-      });
-    });
+    let presentaciones = await obtenerTodasLasPresentaciones(cuit);
 
     if (desde) presentaciones = presentaciones.filter(p => p.fecha && p.fecha >= desde);
     if (hasta) presentaciones = presentaciones.filter(p => p.fecha && p.fecha <= hasta);
     if (tipo) presentaciones = presentaciones.filter(p => p.descripcion.toLowerCase().includes(tipo));
 
     presentacionesActuales = presentaciones;
+    filtrosActuales = { cuit, desde, hasta, tipo };
     renderTabla(presentaciones);
 
     status.textContent = `${presentaciones.length} presentaciones encontradas.`;
@@ -464,6 +502,103 @@ async function buscar() {
     btn.disabled = false;
   }
 }
+
+// ---- Paso 1: exportar la lista + instrucciones para la IA como .md ----
+function armarMarkdown(presentaciones, filtros) {
+  const partesFiltro = [];
+  if (filtros.desde) partesFiltro.push(`desde ${filtros.desde}`);
+  if (filtros.hasta) partesFiltro.push(`hasta ${filtros.hasta}`);
+  const filtroFecha = partesFiltro.length ? partesFiltro.join(' ') : '(sin límite de fechas)';
+  const filtroTipo = filtros.tipo ? filtros.tipo : '(sin filtro de tipo)';
+
+  const listado = presentaciones.map((p, i) => `${i}. [${p.fechaTexto}] ${p.descripcion}`).join('\n');
+
+  return `# Presentaciones ante la CNV — para revisión por IA
+
+CUIT de la emisora: ${filtros.cuit}
+Filtro de fecha aplicado: ${filtroFecha}
+Filtro de tipo aplicado: ${filtroTipo}
+Total de presentaciones en esta lista: ${presentaciones.length}
+
+## Instrucciones para la IA
+
+A continuación hay una lista numerada de presentaciones regulatorias hechas
+por esta empresa ante la CNV (Comisión Nacional de Valores, Argentina).
+Cada línea tiene el formato:
+
+    <número>. [<fecha>] <descripción>
+
+Junto con este archivo, el usuario te va a decir qué está buscando (por
+ejemplo, un tema, un tipo de documento, un rango de fechas más específico,
+etc.). Tu tarea es identificar cuáles de las presentaciones de la lista de
+abajo corresponden a ese pedido.
+
+Respondé ÚNICAMENTE con un array de números en formato JSON, usando los
+mismos números que preceden a cada línea de la lista. No agregues texto
+antes ni después del array, ni explicaciones.
+
+Ejemplo de respuesta válida: [2,5,11]
+Si ninguna presentación corresponde al pedido, respondé: []
+
+## Lista de presentaciones
+
+${listado}
+`;
+}
+
+function descargarMarkdown() {
+  if (presentacionesActuales.length === 0) return;
+  const md = armarMarkdown(presentacionesActuales, filtrosActuales);
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `presentaciones_cnv_${filtrosActuales.cuit || 'listado'}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// ---- Paso 3: cargar de vuelta los números que devolvió la IA ----
+function extraerIndices(texto) {
+  const matchArray = texto.match(/\[[\d,\s]*\]/);
+  if (matchArray) {
+    try { return JSON.parse(matchArray[0]); } catch (e) { /* sigue abajo */ }
+  }
+  // Respaldo: juntar todos los números sueltos que aparezcan en el texto
+  const numeros = texto.match(/\d+/g);
+  return numeros ? numeros.map(Number) : [];
+}
+
+function aplicarSeleccion(indices) {
+  document.querySelectorAll('.chk').forEach(chk => {
+    const idx = parseInt(chk.dataset.idx);
+    const marcar = indices.includes(idx);
+    chk.checked = marcar;
+    chk.closest('tr').classList.toggle('selected', marcar);
+  });
+  actualizarContador();
+}
+
+const dialogCarga = document.getElementById('dialog-carga');
+
+document.getElementById('btn-descargar-md').addEventListener('click', descargarMarkdown);
+
+document.getElementById('btn-abrir-carga').addEventListener('click', () => {
+  document.getElementById('respuesta-ia').value = '';
+  dialogCarga.showModal();
+});
+document.getElementById('btn-cancelar-carga').addEventListener('click', () => dialogCarga.close());
+
+document.getElementById('btn-aplicar-carga').addEventListener('click', () => {
+  const respuesta = document.getElementById('respuesta-ia').value.trim();
+  const status = document.getElementById('status-buscar');
+  if (!respuesta) return;
+  const indices = extraerIndices(respuesta);
+  aplicarSeleccion(indices);
+  status.className = 'status-line';
+  status.textContent = `${indices.length} de ${presentacionesActuales.length} seleccionadas según la respuesta pegada.`;
+  dialogCarga.close();
+});
 
 function renderTabla(presentaciones) {
   const cont = document.getElementById('tabla-contenedor');
