@@ -6,33 +6,36 @@ navegador — no necesita servidor propio.
 
 ## Cómo funciona
 
-1. Traés el listado de presentaciones de una empresa por CUIT, filtrando
-   por fecha y/o por texto en la descripción (tipo de documento).
-2. Elegís una o varias filas con checkbox — a mano, o con ayuda de una IA
-   externa (ver más abajo).
-3. Descargás todo lo elegido como un único `.zip`.
+1. Ponés el CUIT, y opcionalmente fechas, un tipo de documento y, en el
+   cuadro **"¿Qué necesitás encontrar?"**, todo lo que buscás (una búsqueda
+   por renglón).
+2. La app trae el listado de presentaciones de la CNV y, si completaste el
+   cuadro, una IA marca qué presentaciones corresponden a cada búsqueda
+   (columna **"Coincide con"**). Quedan tildadas y podés ver solo esas.
+3. Revisás, ajustás a mano si hace falta, y descargás todo como un `.zip`.
 
-### Elegir filas con ayuda de una IA (sin API, sin costo)
+### Búsqueda con IA (gratis, sin cuenta para los usuarios)
 
-La app **no llama a ninguna IA por su cuenta** — no usa ninguna clave de
-API ni depende de ninguna cuenta. En cambio, te da los datos para que uses
-la IA que ya tengas a mano (ChatGPT, Claude, Gemini, la que sea), en dos
-pasos manuales:
+La IA corre en el mismo Cloudflare Worker que hace de proxy, usando
+**Cloudflare Workers AI** (10.000 "neurons" gratis por día, alcanza para
+varias decenas de búsquedas diarias). Las personas que usan la app no
+necesitan cuenta ni clave: solo el dueño del Worker tiene la cuenta gratuita
+de Cloudflare.
 
-1. Después de buscar, apretás **"Descargar descripciones (.md)"**. Se baja
-   un archivo Markdown con la lista numerada de `[fecha] descripción` de
-   los resultados actuales, más instrucciones precisas para que una IA
-   sepa cómo leer esa lista y qué formato de respuesta devolver.
-2. Subís (o pegás) ese archivo en tu app de IA, junto con una frase tuya
-   describiendo qué estás buscando (ej: "elegí las que hablan de aumento
-   de capital"). La IA te va a devolver algo como `[2,5,11]`.
-3. Volvés a la app, apretás **"Cargar selección de la IA"**, pegás esa
-   respuesta, y quedan tildados los checkboxes correspondientes — listos
-   para descargar.
+Para ahorrar cupo, la app manda cada descripción distinta una sola vez (muchas
+presentaciones se llaman igual, p. ej. "HECHO RELEVANTE") y en tandas de 120.
+Conviene usar los filtros de fecha para acotar antes de buscar con IA.
 
-Como el archivo `.md` ya incluye la lista completa y las instrucciones de
-formato, cualquier persona que use esta herramienta puede hacer este paso
-con la IA que prefiera, sin que la app dependa de ninguna cuenta ni clave.
+La IA solo ve la **descripción** de cada presentación, no el contenido de los
+PDFs. Si lo que buscás no aparece en el título (p. ej. el tema de un "Hecho
+Relevante"), no lo va a encontrar.
+
+Opcionalmente se pueden cargar claves gratuitas de **Groq** y/o **Gemini**
+como respaldo: si se agota el cupo diario de Cloudflare, el Worker pasa solo
+al siguiente proveedor.
+
+La alternativa manual (descargar un `.md` y pasárselo a cualquier IA) sigue
+disponible en "Alternativa manual".
 
 Los pedidos a `www.cnv.gov.ar` y `aif2.cnv.gov.ar` pasan por un proxy CORS
 público (necesario porque esos sitios no están pensados para ser
@@ -46,35 +49,40 @@ fallar o demorar. Se puede cambiar agregando otro proxy a la lista
 
 ## Publicar en GitHub Pages
 
-**Paso 0 (recomendado): tu propio proxy en Cloudflare Workers**
+**Paso 0: tu Worker en Cloudflare (proxy + IA)**
 
-Los proxies CORS públicos (allorigins, codetabs, corsproxy.io) son
-gratuitos pero poco confiables — algunos exigen cuenta ahora, otros
-pueden estar bloqueados según tu red o caídos sin aviso. Para una
-experiencia estable, armá tu propio proxy en 5 minutos:
-
-1. Creá una cuenta gratis en https://dash.cloudflare.com/sign-up (sin tarjeta).
-2. Workers y Pages → Crear aplicación → Crear Worker. Ponele un nombre
-   (ej. `cnv-proxy`) y desplegalo con el código de ejemplo.
+1. Creá una cuenta gratis en https://dash.cloudflare.com/sign-up (sin tarjeta),
+   o usá la que ya tenés.
+2. Workers y Pages → Crear aplicación → Crear Worker (ej. `cnv-proxy`), o abrí
+   el que ya existe.
 3. Editar código → borrá todo y pegá el contenido de `cloudflare-worker.js`
-   (incluido en esta carpeta) → Guardar y desplegar.
-4. Copiá la URL que te da (ej. `https://cnv-proxy.tu-usuario.workers.dev`).
-5. En `index.html`, buscá la línea `const MI_WORKER = '';` cerca del
-   principio del `<script>` y pegá tu URL ahí adentro:
-   ```js
-   const MI_WORKER = 'https://cnv-proxy.tu-usuario.workers.dev';
-   ```
+   → Guardar y desplegar.
+4. **Activar la IA:** en el Worker, Settings → Bindings → Add → **Workers AI**.
+   Nombre de variable: `AI` → Guardar. (Sin este paso el proxy funciona pero
+   la búsqueda con IA no.)
+5. Verificá entrando a `https://TU-WORKER.workers.dev/estado`: tiene que
+   decir `"cloudflare": true`.
+6. En `index.html`, la línea `const MI_WORKER = '...';` tiene que tener la URL
+   de tu Worker.
+7. Si publicás la app en un dominio distinto de `https://bobhard76.github.io`,
+   agregalo a `ORIGENES_PERMITIDOS` al principio de `cloudflare-worker.js`
+   (evita que otras páginas usen tu cupo de IA).
 
-Si dejás `MI_WORKER` vacío, la app va a intentar con los proxies
-públicos igual (menos confiable, pero funciona como respaldo).
+**Respaldo opcional (Groq / Gemini):** en el Worker, Settings → Variables and
+Secrets → Add → tipo *Secret*:
+- `GROQ_API_KEY` — clave gratuita de https://console.groq.com/keys
+- `GEMINI_API_KEY` — clave gratuita de https://aistudio.google.com/apikey
+
+Para cambiar el modelo de Cloudflare, agregá una variable `CF_MODEL` (por
+defecto `@cf/meta/llama-3.3-70b-instruct-fp8-fast`).
 
 **Publicar la app**
 
 1. Creá un repositorio nuevo en GitHub (público, para que Pages sea gratis).
-2. Subí `index.html` (con tu `MI_WORKER` ya cargado) y este `README.md`:
+2. Subí `index.html` (con tu `MI_WORKER` ya cargado), `cloudflare-worker.js` y este `README.md`:
    ```bash
    git init
-   git add index.html README.md
+   git add index.html README.md cloudflare-worker.js
    git commit -m "Buscador CNV"
    git branch -M main
    git remote add origin https://github.com/TU-USUARIO/TU-REPO.git
@@ -89,9 +97,9 @@ públicos igual (menos confiable, pero funciona como respaldo).
 
 - Sitios pesados: el listado completo de una empresa puede tardar
   1-2 minutos en traerse (la página de la CNV es grande).
-- El proxy CORS público puede tener límites de uso; para uso intensivo,
-  considerá correr tu propio proxy (por ejemplo, un Cloudflare Worker
-  de 5 líneas) y reemplazar la lista `PROXIES`.
+- Cupo de IA: el gratuito de Cloudflare se renueva cada día (00:00 UTC). Un
+  listado grande sin filtro de fechas consume más; si se agota, se usa Groq
+  o Gemini si están configurados.
 - Si la CNV cambia la estructura de su sitio, los selectores/regex en
   `index.html` van a necesitar ajustarse (son los mismos que en el
   script de Python original).

@@ -97,6 +97,49 @@
     font-size:.7rem;
     color:var(--ink-faint);
   }
+  textarea.busquedas{
+    font-family:var(--sans);
+    font-size:.88rem;
+    padding:.6rem;
+    border:1px solid var(--line-strong);
+    border-radius:var(--radius);
+    background:#fff;
+    color:var(--ink);
+    resize:vertical;
+    min-height:5.5rem;
+    width:100%;
+    line-height:1.45;
+  }
+  textarea.busquedas:focus{ outline:none; border-color:var(--navy); box-shadow:0 0 0 2px rgba(27,51,88,.12); }
+  .ia-bar{
+    display:flex; align-items:center; gap:.75rem; flex-wrap:wrap;
+    background:rgba(27,51,88,.045);
+    border:1px solid rgba(27,51,88,.18);
+    border-radius:var(--radius);
+    padding:.75rem .9rem;
+    margin-bottom:1rem;
+  }
+  .ia-bar label.toggle{ font-size:.8rem; color:var(--ink-soft); display:flex; align-items:center; gap:.35rem; cursor:pointer; }
+  .chip{
+    display:inline-block;
+    font-size:.68rem;
+    font-weight:600;
+    color:var(--navy);
+    background:rgba(27,51,88,.09);
+    border-radius:10px;
+    padding:.08rem .5rem;
+    margin:0 .25rem .2rem 0;
+    white-space:nowrap;
+    max-width:220px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    vertical-align:middle;
+  }
+  td.match{ width:30%; }
+  td.match .motivo{ display:block; font-size:.72rem; color:var(--ink-faint); }
+  tr.oculta{ display:none; }
+  details.manual{ margin-bottom:1rem; font-size:.82rem; color:var(--ink-soft); }
+  details.manual summary{ cursor:pointer; font-weight:500; }
   input, select{
     font-family:var(--mono);
     font-size:.88rem;
@@ -320,6 +363,16 @@
         </datalist>
       </div>
     </div>
+    <div class="grid" style="margin-top:1rem; grid-template-columns:1fr;">
+      <div class="field">
+        <label for="busquedas-ia">¿Qué necesitás encontrar? (búsqueda con IA, opcional)</label>
+        <textarea id="busquedas-ia" class="busquedas" placeholder="Una búsqueda por renglón, por ejemplo:
+balances anuales
+cambios en el directorio
+emisión de obligaciones negociables"></textarea>
+        <small>Si completás esto, después de traer el listado la IA marca cuáles presentaciones corresponden a cada renglón. Gratis, sin cuenta.</small>
+      </div>
+    </div>
     <div class="actions-bar">
       <button class="primary" id="btn-buscar">Buscar</button>
       <span class="status-line" id="status-buscar"></span>
@@ -344,16 +397,23 @@
 
   <section class="panel" id="panel-resultados" style="display:none;">
     <h2>2. Elegir y descargar</h2>
-    <p style="font-size:.82rem; color:var(--ink-soft); margin:0 0 1rem;">
-      Podés tildar filas a mano, o usar el flujo de dos pasos con tu IA de
-      confianza: descargá el archivo <strong>.md</strong> con la lista y las
-      instrucciones, pedile a la IA que elija según lo que buscás, y pegá su
-      respuesta en <strong>"Cargar selección de la IA"</strong>.
-    </p>
-    <div class="actions-bar" style="margin-top:0; margin-bottom:1rem;">
-      <button class="secondary" id="btn-descargar-md">Descargar descripciones (.md)</button>
-      <button class="secondary" id="btn-abrir-carga">Cargar selección de la IA</button>
+    <div class="ia-bar">
+      <button class="primary" id="btn-ia">Buscar con IA</button>
+      <label class="toggle"><input type="checkbox" id="solo-coincidencias" disabled> Mostrar solo coincidencias</label>
+      <span class="status-line" id="status-ia">Escribí arriba qué buscás y apretá "Buscar con IA", o tildá filas a mano.</span>
     </div>
+    <details class="manual">
+      <summary>Alternativa manual: usar otra IA (ChatGPT, Claude, etc.)</summary>
+      <p style="margin:.6rem 0;">
+        Descargá el archivo <strong>.md</strong> con la lista y las instrucciones,
+        pedile a tu IA que elija según lo que buscás, y pegá su respuesta en
+        <strong>"Cargar selección de la IA"</strong>.
+      </p>
+      <div class="actions-bar" style="margin-top:0;">
+        <button class="secondary" id="btn-descargar-md">Descargar descripciones (.md)</button>
+        <button class="secondary" id="btn-abrir-carga">Cargar selección de la IA</button>
+      </div>
+    </details>
     <div id="tabla-contenedor"></div>
     <div class="sticky-bar">
       <span class="count" id="count-seleccion">0 seleccionadas</span>
@@ -495,6 +555,7 @@ async function buscar() {
     renderTabla(presentaciones);
 
     status.textContent = `${presentaciones.length} presentaciones encontradas.`;
+    if (leerBusquedas().length && presentaciones.length) buscarConIA();
   } catch (e) {
     status.className = 'status-line err';
     status.textContent = 'No se pudo traer el listado: ' + e.message;
@@ -600,6 +661,130 @@ document.getElementById('btn-aplicar-carga').addEventListener('click', () => {
   dialogCarga.close();
 });
 
+// ---- Búsqueda con IA (vía el Worker de Cloudflare, gratis) ----
+const TAMANO_TANDA = 120; // descripciones únicas por pedido a la IA
+let resultadosIA = {};    // idx de fila -> [{busqueda, motivo}]
+
+function esc(t) {
+  return String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function leerBusquedas() {
+  return document.getElementById('busquedas-ia').value
+    .split('\n').map(s => s.trim()).filter(Boolean).slice(0, 20);
+}
+
+async function buscarConIA() {
+  const busquedas = leerBusquedas();
+  const status = document.getElementById('status-ia');
+  const btn = document.getElementById('btn-ia');
+  const solo = document.getElementById('solo-coincidencias');
+
+  if (!busquedas.length) {
+    status.className = 'status-line err';
+    status.textContent = 'Escribí al menos una búsqueda en el cuadro de arriba (una por renglón).';
+    document.getElementById('busquedas-ia').focus();
+    return;
+  }
+  if (!presentacionesActuales.length) return;
+  if (!MI_WORKER) {
+    status.className = 'status-line err';
+    status.textContent = 'Falta configurar MI_WORKER (ver README).';
+    return;
+  }
+
+  // Muchas presentaciones repiten la misma descripción: se manda cada texto una sola vez.
+  const unicos = [];
+  const filasPorTexto = new Map();
+  presentacionesActuales.forEach((p, i) => {
+    const texto = p.descripcion.replace(/\s+/g, ' ').trim();
+    if (!texto) return;
+    if (!filasPorTexto.has(texto)) { filasPorTexto.set(texto, []); unicos.push(texto); }
+    filasPorTexto.get(texto).push(i);
+  });
+
+  btn.disabled = true;
+  status.className = 'status-line';
+  resultadosIA = {};
+  document.querySelectorAll('td.match').forEach(td => td.innerHTML = '');
+
+  const tandas = [];
+  for (let i = 0; i < unicos.length; i += TAMANO_TANDA) tandas.push(unicos.slice(i, i + TAMANO_TANDA));
+
+  let proveedor = '', errores = 0, ultimoError = null;
+  try {
+    for (let t = 0; t < tandas.length; t++) {
+      status.textContent = `Analizando con IA... tanda ${t + 1} de ${tandas.length}`;
+      const base = t * TAMANO_TANDA;
+      const items = tandas[t].map((texto, j) => ({ id: base + j, texto }));
+      let data;
+      try {
+        const resp = await fetch(`${MI_WORKER}/ia`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ busquedas, items }),
+        });
+        data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      } catch (e) {
+        errores++;
+        ultimoError = e;
+        console.warn('[IA] tanda', t + 1, e);
+        continue;
+      }
+      proveedor = data.proveedor || proveedor;
+      for (const c of data.coincidencias || []) {
+        const texto = unicos[c.id];
+        if (!texto) continue;
+        for (const idx of filasPorTexto.get(texto)) {
+          (resultadosIA[idx] ||= []).push({ busqueda: c.busqueda, motivo: c.motivo });
+        }
+      }
+    }
+    if (errores === tandas.length) throw ultimoError;
+  } catch (e) {
+    status.className = 'status-line err';
+    status.textContent = 'La búsqueda con IA falló: ' + e.message;
+    btn.disabled = false;
+    return;
+  }
+
+  // Pintar resultados y tildar coincidencias
+  const idxs = Object.keys(resultadosIA).map(Number);
+  presentacionesActuales.forEach((_, i) => {
+    const td = document.getElementById('match-' + i);
+    const lista = resultadosIA[i];
+    if (!td) return;
+    td.innerHTML = lista ? lista.map(r =>
+      `<span class="chip" title="${esc(r.motivo)}">${esc(busquedas[r.busqueda - 1])}</span>`).join('') +
+      (lista[0].motivo ? `<span class="motivo">${esc(lista[0].motivo)}</span>` : '') : '';
+  });
+  aplicarSeleccion(idxs);
+
+  solo.disabled = idxs.length === 0;
+  solo.checked = idxs.length > 0;
+  aplicarFiltroCoincidencias();
+
+  const porBusqueda = busquedas.map((b, k) =>
+    `${b}: ${idxs.filter(i => resultadosIA[i].some(r => r.busqueda === k + 1)).length}`).join(' · ');
+  status.className = errores ? 'status-line err' : 'status-line';
+  status.textContent = `${idxs.length} coincidencias (${porBusqueda})` +
+    (errores ? ` — ${errores} tanda(s) fallaron, reintentá` : '') +
+    (proveedor ? ` — IA: ${proveedor}` : '');
+  btn.disabled = false;
+}
+
+function aplicarFiltroCoincidencias() {
+  const solo = document.getElementById('solo-coincidencias').checked;
+  document.querySelectorAll('table.results tbody tr').forEach(tr => {
+    const idx = parseInt(tr.dataset.idx);
+    tr.classList.toggle('oculta', solo && !resultadosIA[idx]);
+  });
+}
+
+document.getElementById('btn-ia').addEventListener('click', buscarConIA);
+document.getElementById('solo-coincidencias').addEventListener('change', aplicarFiltroCoincidencias);
+
 function renderTabla(presentaciones) {
   const cont = document.getElementById('tabla-contenedor');
   document.getElementById('panel-resultados').style.display = 'block';
@@ -611,17 +796,23 @@ function renderTabla(presentaciones) {
     return;
   }
 
+  resultadosIA = {};
+  const solo = document.getElementById('solo-coincidencias');
+  solo.checked = false;
+  solo.disabled = true;
+
   let filas = presentaciones.map((p, i) => `
     <tr data-idx="${i}">
       <td class="check"><input type="checkbox" class="chk" data-idx="${i}"></td>
-      <td class="fecha">${p.fechaTexto}</td>
-      <td>${p.descripcion}</td>
+      <td class="fecha">${esc(p.fechaTexto)}</td>
+      <td>${esc(p.descripcion)}</td>
+      <td class="match" id="match-${i}"></td>
     </tr>
   `).join('');
 
   cont.innerHTML = `
     <table class="results">
-      <thead><tr><th></th><th>Fecha</th><th>Descripción</th></tr></thead>
+      <thead><tr><th></th><th>Fecha</th><th>Descripción</th><th>Coincide con</th></tr></thead>
       <tbody>${filas}</tbody>
     </table>
   `;
@@ -733,7 +924,7 @@ async function descargarSeleccionadas() {
 document.getElementById('btn-buscar').addEventListener('click', buscar);
 document.getElementById('btn-descargar').addEventListener('click', descargarSeleccionadas);
 document.getElementById('btn-todas').addEventListener('click', () => {
-  const todos = document.querySelectorAll('.chk');
+  const todos = document.querySelectorAll('table.results tbody tr:not(.oculta) .chk');
   const algunoSinMarcar = Array.from(todos).some(c => !c.checked);
   todos.forEach(c => {
     c.checked = algunoSinMarcar;
